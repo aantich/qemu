@@ -1480,7 +1480,13 @@ int hvf_arch_init_vcpu(CPUState *cpu)
     assert_hvf_ok(ret);
 
     pfr = GET_IDREG(&arm_cpu->isar, ID_AA64PFR0);
-    pfr |= env->gicv3state ? (1 << 24) : 0;
+    /*
+     * The platform GIC is implemented by HVF, so it has no emulated
+     * CPU-interface state. It still provides the GICv3 system registers.
+     */
+    if (env->gicv3state || hvf_irqchip_in_kernel()) {
+        pfr = FIELD_DP64(pfr, ID_AA64PFR0, GIC, 1);
+    }
     ret = hv_vcpu_set_sys_reg(cpu->accel->fd, HV_SYS_REG_ID_AA64PFR0_EL1, pfr);
     assert_hvf_ok(ret);
 
