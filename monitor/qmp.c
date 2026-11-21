@@ -639,6 +639,9 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
         switch (mon->close_action) {
         case MONITOR_QMP_CLOSE_ACTION_NONE:
             break;
+        case MONITOR_QMP_CLOSE_ACTION_QUIT:
+            qmp_quit(NULL);
+            break;
         case MONITOR_QMP_CLOSE_ACTION_DELETE:
             mon->delete_pending = true;
             /*

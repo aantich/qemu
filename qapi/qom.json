@@ -1224,10 +1224,14 @@
 # @delete: delete both the 'monitor-qmp' object and its associated
 #     character device backend object
 #
+# @quit: shut down the QEMU process, as with the 'quit' command.
+#     Use only for a private, non-reconnecting supervisor connection.
+#     Added by the Velvet build.
+#
 # Since: 11.1
 ##
 { 'enum': 'MonitorQMPCloseAction',
-  'data': ['none', 'delete'] }
+  'data': ['none', 'delete', 'quit'] }
 
 ##
 # @MonitorQMPProperties:
