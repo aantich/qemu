@@ -28,7 +28,6 @@
 #import <QuartzCore/QuartzCore.h>
 #include <crt_externs.h>
 
-#include "qemu/help-texts.h"
 #include "qemu-main.h"
 #include "standard-headers/linux/input-event-codes.h"
 #include "ui/clipboard.h"
@@ -44,13 +43,13 @@
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-commands-misc.h"
 #include "system/blockdev.h"
-#include "qemu-version.h"
 #include "qemu/cutils.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include <Carbon/Carbon.h>
 #include "hw/core/cpu.h"
+#include "VelvetConsoleWindowGeometry.h"
 
 #ifndef MAC_OS_VERSION_14_0
 #define MAC_OS_VERSION_14_0 140000
@@ -150,6 +149,20 @@ static int cocoa_keycode_to_linux(int keycode)
     return qemu_input_map_osx_to_linux[keycode];
 }
 
+static NSString *velvet_runner_name(void)
+{
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"]
+        ?: @"Velvet Runner";
+}
+
+static NSString *velvet_console_title(void)
+{
+    const char *title = g_getenv("VELVET_VM_WINDOW_TITLE");
+    NSString *name = title ? [NSString stringWithUTF8String:title] : nil;
+
+    return name ?: velvet_runner_name();
+}
+
 /* Displays an alert dialog box with the specified message */
 static void QEMU_Alert(NSString *message)
 {
@@ -163,9 +176,8 @@ static void QEMU_Alert(NSString *message)
 static void handleAnyDeviceErrors(Error * err)
 {
     if (err) {
-        QEMU_Alert([NSString stringWithCString: error_get_pretty(err)
-                                      encoding: NSASCIIStringEncoding]);
-        error_free(err);
+        error_report_err(err);
+        QEMU_Alert(@"Couldn’t change the VM’s installation media.");
     }
 }
 
@@ -197,6 +209,7 @@ static void handleAnyDeviceErrors(Error * err)
     bool mouseOn;
 }
 - (void) switchSurface:(pixman_image_t *)image;
+- (void) fitGuestWindow;
 - (void) grabMouse;
 - (void) ungrabMouse;
 - (void) setFullGrab:(id)sender;
@@ -495,15 +508,37 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     return size;
 }
 
+- (void) fitGuestWindow
+{
+    NSWindow *window = [self window];
+    if (!window || ([window styleMask] &
+        (NSWindowStyleMaskResizable | NSWindowStyleMaskFullScreen)) ||
+        screen.width <= 0 || screen.height <= 0) {
+        return;
+    }
+
+    /* Keep the same logical size on each display. AppKit scales the backing
+     * store for Retina while the view bounds stay in guest coordinates. */
+    NSScreen *display = [window screen] ?: [NSScreen mainScreen];
+    NSSize preferred = NSMakeSize(screen.width, screen.height);
+    NSSize available = display
+        ? [window contentRectForFrameRect:[display visibleFrame]].size
+        : preferred;
+    VelvetConsoleSize fitted = VelvetConsoleFit(
+        (VelvetConsoleSize){preferred.width, preferred.height},
+        (VelvetConsoleSize){available.width, available.height});
+    NSSize size = NSMakeSize(fitted.width, fitted.height);
+    if (!NSEqualSizes([self frame].size, size)) {
+        [window setContentSize:size];
+    }
+}
+
 - (void) resizeWindow
 {
     [[self window] setContentAspectRatio:NSMakeSize(screen.width, screen.height)];
 
     if (!([[self window] styleMask] & NSWindowStyleMaskResizable)) {
-        CGFloat width = screen.width / [[self window] backingScaleFactor];
-        CGFloat height = screen.height / [[self window] backingScaleFactor];
-
-        [[self window] setContentSize:NSMakeSize(width, height)];
+        [self fitGuestWindow];
         [[self window] center];
     } else if ([[self window] styleMask] & NSWindowStyleMaskFullScreen) {
         [[self window] setContentSize:[self fixAspectRatio:[self screenSafeAreaSize]]];
@@ -524,19 +559,22 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 - (void) updateUIInfoLocked
 {
     /* Must be called with the BQL, i.e. via updateUIInfo */
+    NSWindow *window = [self window];
+    NSScreen *displayScreen = [window screen];
+    NSWindowStyleMask style = [window styleMask];
     NSSize frameSize;
-    QemuUIInfo info;
+    QemuUIInfo info = {0};
 
     if (!qemu_console_is_graphic(dcl.con)) {
         return;
     }
 
-    if ([self window]) {
-        NSDictionary *description = [[[self window] screen] deviceDescription];
+    if (displayScreen) {
+        NSDictionary *description = [displayScreen deviceDescription];
         CGDirectDisplayID display = [[description objectForKey:@"NSScreenNumber"] unsignedIntValue];
-        NSSize screenSize = [[[self window] screen] frame].size;
+        NSSize screenSize = [displayScreen frame].size;
         CGSize screenPhysicalSize = CGDisplayScreenSize(display);
-        bool isFullscreen = ([[self window] styleMask] & NSWindowStyleMaskFullScreen) != 0;
+        bool isFullscreen = (style & NSWindowStyleMaskFullScreen) != 0;
         CVDisplayLinkRef displayLink;
 
         frameSize = isFullscreen ? [self screenSafeAreaSize] : [self frame].size;
@@ -561,8 +599,16 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
     info.xoff = 0;
     info.yoff = 0;
-    info.width = frameSize.width * [[self window] backingScaleFactor];
-    info.height = frameSize.height * [[self window] backingScaleFactor];
+    /* Automatic window sizing follows the guest mode. Feeding the Retina
+     * backing size back to the guest could trigger another mode change. */
+    if (window && !(style & (NSWindowStyleMaskResizable |
+                             NSWindowStyleMaskFullScreen))) {
+        info.width = screen.width;
+        info.height = screen.height;
+    } else {
+        info.width = frameSize.width * [window backingScaleFactor];
+        info.height = frameSize.height * [window backingScaleFactor];
+    }
 
     qemu_console_set_ui_info(dcl.con, &info, TRUE);
 }
@@ -1057,10 +1103,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 {
     COCOA_DEBUG("QemuCocoaView: grabMouse\n");
 
-    if (qemu_name)
-        [[self window] setTitle:[NSString stringWithFormat:@"QEMU %s - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)", qemu_name]];
-    else
-        [[self window] setTitle:@"QEMU - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)"];
+    [[self window] setTitle:[NSString stringWithFormat:
+        @"%@ — Press " UC_CTRL_KEY " " UC_ALT_KEY " G to release mouse",
+        velvet_console_title()]];
     [self hideCursor];
     CGAssociateMouseAndMouseCursorPosition(isAbsoluteEnabled);
     isMouseGrabbed = TRUE; // while isMouseGrabbed = TRUE, QemuCocoaApp sends all events to [cocoaView handleEvent:]
@@ -1070,10 +1115,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 {
     COCOA_DEBUG("QemuCocoaView: ungrabMouse\n");
 
-    if (qemu_name)
-        [[self window] setTitle:[NSString stringWithFormat:@"QEMU %s", qemu_name]];
-    else
-        [[self window] setTitle:@"QEMU"];
+    [[self window] setTitle:velvet_console_title()];
     [self unhideCursor];
     CGAssociateMouseAndMouseCursorPosition(TRUE);
     isMouseGrabbed = FALSE;
@@ -1136,7 +1178,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 {
 }
 - (void)doToggleFullScreen:(id)sender;
-- (void)showQEMUDoc:(id)sender;
+- (void)showVelvetGuide:(id)sender;
 - (void)zoomToFit:(id) sender;
 - (void)displayConsole:(id)sender;
 - (void)pauseQEMU:(id)sender;
@@ -1148,7 +1190,6 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 - (void)ejectDeviceMedia:(id)sender;
 - (void)changeDeviceMedia:(id)sender;
 - (BOOL)verifyQuit;
-- (void)openDocumentation:(NSString *)filename;
 - (IBAction) do_about_menu_item: (id) sender;
 - (void)adjustSpeed:(id)sender;
 @end
@@ -1180,8 +1221,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         }
         [window setAcceptsMouseMovedEvents:YES];
         [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
-        [window setTitle:qemu_name ? [NSString stringWithFormat:@"QEMU %s", qemu_name] : @"QEMU"];
+        [window setTitle:velvet_console_title()];
         [window setContentView:cocoaView];
+        [cocoaView fitGuestWindow];
         [window makeKeyAndOrderFront:self];
         [window center];
         [window setDelegate: self];
@@ -1247,6 +1289,21 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
 - (void)windowDidChangeScreen:(NSNotification *)notification
 {
+    [cocoaView fitGuestWindow];
+    [cocoaView updateUIInfo];
+}
+
+- (void)windowDidChangeBackingProperties:(NSNotification *)notification
+{
+    NSNumber *oldScale = [notification userInfo][NSBackingPropertyOldScaleFactorKey];
+    if ([oldScale doubleValue] != [[notification object] backingScaleFactor]) {
+        [cocoaView updateUIInfo];
+    }
+}
+
+- (void)applicationDidChangeScreenParameters:(NSNotification *)notification
+{
+    [cocoaView fitGuestWindow];
     [cocoaView updateUIInfo];
 }
 
@@ -1317,38 +1374,12 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     [cocoaView setFullGrab:sender];
 }
 
-/* Tries to find then open the specified filename */
-- (void) openDocumentation: (NSString *) filename
+- (void)showVelvetGuide:(id)sender
 {
-    /* Where to look for local files */
-    NSString *path_array[] = {@"../share/doc/qemu/", @"../doc/qemu/", @"docs/"};
-    NSString *full_file_path;
-    NSURL *full_file_url;
-
-    /* iterate thru the possible paths until the file is found */
-    int index;
-    for (index = 0; index < ARRAY_SIZE(path_array); index++) {
-        full_file_path = [[NSBundle mainBundle] executablePath];
-        full_file_path = [full_file_path stringByDeletingLastPathComponent];
-        full_file_path = [NSString stringWithFormat: @"%@/%@%@", full_file_path,
-                          path_array[index], filename];
-        full_file_url = [NSURL fileURLWithPath: full_file_path
-                                   isDirectory: false];
-        if ([[NSWorkspace sharedWorkspace] openURL: full_file_url] == YES) {
-            return;
-        }
+    NSURL *guide = [NSURL URLWithString:@"https://macpoppy.com/velvet/userguide"];
+    if (![[NSWorkspace sharedWorkspace] openURL:guide]) {
+        QEMU_Alert(@"Couldn’t open the Velvet User Guide.");
     }
-
-    /* If none of the paths opened a file */
-    NSBeep();
-    QEMU_Alert(@"Failed to open file");
-}
-
-- (void)showQEMUDoc:(id)sender
-{
-    COCOA_DEBUG("QemuCocoaAppController: showQEMUDoc\n");
-
-    [self openDocumentation: @"index.html"];
 }
 
 /* Stretches video to fit host monitor size */
@@ -1506,7 +1537,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 {
     NSAlert *alert = [NSAlert new];
     [alert autorelease];
-    [alert setMessageText: @"Are you sure you want to quit QEMU?"];
+    [alert setMessageText:
+        [NSString stringWithFormat:@"Are you sure you want to quit %@?",
+                                   velvet_runner_name()]];
     [alert addButtonWithTitle: @"Cancel"];
     [alert addButtonWithTitle: @"Quit"];
     if([alert runModal] == NSAlertSecondButtonReturn) {
@@ -1519,29 +1552,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 /* The action method for the About menu item */
 - (IBAction) do_about_menu_item: (id) sender
 {
-    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    char *icon_path_c = get_relocated_path(CONFIG_QEMU_ICONDIR "/hicolor/512x512/apps/qemu.png");
-    NSString *icon_path = [NSString stringWithUTF8String:icon_path_c];
-    g_free(icon_path_c);
-    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:icon_path];
-    NSString *version = @"QEMU emulator version " QEMU_FULL_VERSION;
-    NSString *copyright = @QEMU_COPYRIGHT;
-    NSDictionary *options;
-    if (icon) {
-        options = @{
-            NSAboutPanelOptionApplicationIcon : icon,
-            NSAboutPanelOptionApplicationVersion : version,
-            @"Copyright" : copyright,
-        };
-        [icon release];
-    } else {
-        options = @{
-            NSAboutPanelOptionApplicationVersion : version,
-            @"Copyright" : copyright,
-        };
-    }
-    [NSApp orderFrontStandardAboutPanelWithOptions:options];
-    [pool release];
+    [NSApp orderFrontStandardAboutPanelWithOptions:@{
+        NSAboutPanelOptionApplicationName: velvet_runner_name()
+    }];
 }
 
 /* Used by the Speed menu items */
@@ -1599,18 +1612,22 @@ static void create_initial_menus(void)
     [NSApp setServicesMenu:[[NSMenu alloc] initWithTitle:@"Services"]];
 
     // Application menu
+    NSString *runner = velvet_runner_name();
     menu = [[NSMenu alloc] initWithTitle:@""];
-    [menu addItemWithTitle:@"About QEMU" action:@selector(do_about_menu_item:) keyEquivalent:@""]; // About QEMU
+    [menu addItemWithTitle:[NSString stringWithFormat:@"About %@", runner]
+                    action:@selector(do_about_menu_item:) keyEquivalent:@""];
     [menu addItem:[NSMenuItem separatorItem]]; //Separator
     menuItem = [menu addItemWithTitle:@"Services" action:nil keyEquivalent:@""];
     [menuItem setSubmenu:[NSApp servicesMenu]];
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:@"Hide QEMU" action:@selector(hide:) keyEquivalent:@"h"]; //Hide QEMU
+    [menu addItemWithTitle:[NSString stringWithFormat:@"Hide %@", runner]
+                    action:@selector(hide:) keyEquivalent:@"h"];
     menuItem = (NSMenuItem *)[menu addItemWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"]; // Hide Others
     [menuItem setKeyEquivalentModifierMask:(NSEventModifierFlagOption|NSEventModifierFlagCommand)];
     [menu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""]; // Show All
     [menu addItem:[NSMenuItem separatorItem]]; //Separator
-    [menu addItemWithTitle:@"Quit QEMU" action:@selector(terminate:) keyEquivalent:@"q"];
+    [menu addItemWithTitle:[NSString stringWithFormat:@"Quit %@", runner]
+                    action:@selector(terminate:) keyEquivalent:@"q"];
     menuItem = [[NSMenuItem alloc] initWithTitle:@"Apple" action:nil keyEquivalent:@""];
     [menuItem setSubmenu:menu];
     [[NSApp mainMenu] addItem:menuItem];
@@ -1679,8 +1696,9 @@ static void create_initial_menus(void)
 
     // Help menu
     menu = [[NSMenu alloc] initWithTitle:@"Help"];
-    [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"QEMU Documentation" action:@selector(showQEMUDoc:) keyEquivalent:@"?"] autorelease]]; // QEMU Help
-    menuItem = [[[NSMenuItem alloc] initWithTitle:@"Window" action:nil keyEquivalent:@""] autorelease];
+    [menu addItemWithTitle:@"Velvet User Guide"
+                    action:@selector(showVelvetGuide:) keyEquivalent:@"?"];
+    menuItem = [[[NSMenuItem alloc] initWithTitle:@"Help" action:nil keyEquivalent:@""] autorelease];
     [menuItem setSubmenu:menu];
     [[NSApp mainMenu] addItem:menuItem];
 }
