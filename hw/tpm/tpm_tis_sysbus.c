@@ -31,6 +31,7 @@
 #include "tpm_tis.h"
 #include "qom/object.h"
 #include "qemu/memalign.h"
+#include "qemu/units.h"
 
 struct TPMStateSysBus {
     /*< private >*/
@@ -38,6 +39,7 @@ struct TPMStateSysBus {
 
     /*< public >*/
     TPMState state; /* not a QOM object */
+    uint64_t ppi_aperture_size;
 };
 
 OBJECT_DECLARE_SIMPLE_TYPE(TPMStateSysBus, TPM_TIS_SYSBUS)
@@ -95,6 +97,8 @@ static const Property tpm_tis_sysbus_properties[] = {
     DEFINE_PROP_UINT32("irq", TPMStateSysBus, state.irq_num, TPM_TIS_IRQ),
     DEFINE_PROP_TPMBE("tpmdev", TPMStateSysBus, state.be_driver),
     DEFINE_PROP_BOOL("ppi", TPMStateSysBus, state.ppi_enabled, true),
+    DEFINE_PROP_SIZE("ppi-aperture-size", TPMStateSysBus, ppi_aperture_size,
+                     TPM_PPI_ADDR_SIZE),
 };
 
 static void tpm_tis_sysbus_initfn(Object *obj)
@@ -120,6 +124,12 @@ static void tpm_tis_sysbus_realizefn(DeviceState *dev, Error **errp)
         error_setg(errp, "'tpmdev' property is required");
         return;
     }
+    if (sbdev->ppi_aperture_size < TPM_PPI_ADDR_SIZE ||
+        sbdev->ppi_aperture_size > 64 * KiB ||
+        !is_power_of_2(sbdev->ppi_aperture_size)) {
+        error_setg(errp, "TPM PPI aperture must be a power of two from 1 to 64 KiB");
+        return;
+    }
 
     memory_region_init_io(&s->mmio, OBJECT(dev), &tpm_tis_memory_ops,
                           s, "tpm-tis-mmio",
@@ -127,10 +137,15 @@ static void tpm_tis_sysbus_realizefn(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mmio);
 
     if (s->ppi_enabled) {
-        s->ppi.buf = qemu_memalign(host_page_size,
-                                   ROUND_UP(TPM_PPI_ADDR_SIZE, host_page_size));
+        uint64_t size = sbdev->ppi_aperture_size;
+
+        /* The register layout stays fixed. A larger aperture lets
+         * accelerators with larger host pages map it as ordinary RAM.
+         */
+        s->ppi.buf = qemu_memalign(host_page_size, ROUND_UP(size, host_page_size));
+        memset(s->ppi.buf, 0, size);
         memory_region_init_ram_device_ptr(&s->ppi.ram, OBJECT(dev), "tpm-ppi",
-                                          TPM_PPI_ADDR_SIZE, s->ppi.buf);
+                                          size, s->ppi.buf);
         sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->ppi.ram);
         vmstate_register_ram(&s->ppi.ram, dev);
     }

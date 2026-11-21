@@ -571,6 +571,11 @@ static QDict *qmp_greeting(MonitorQMP *mon)
         ver, cap_list);
 }
 
+static void monitor_qmp_quit_bh(void *opaque)
+{
+    qmp_quit(NULL);
+}
+
 static void monitor_qmp_self_delete_bh(void *opaque)
 {
     MonitorQMP *mon = opaque;
@@ -640,7 +645,8 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
         case MONITOR_QMP_CLOSE_ACTION_NONE:
             break;
         case MONITOR_QMP_CLOSE_ACTION_QUIT:
-            qmp_quit(NULL);
+            aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                                    monitor_qmp_quit_bh, NULL);
             break;
         case MONITOR_QMP_CLOSE_ACTION_DELETE:
             mon->delete_pending = true;
