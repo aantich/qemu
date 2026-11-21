@@ -223,6 +223,32 @@ static void acpi_dsdt_add_gpio(Aml *scope, const MemMapEntry *gpio_memmap,
 }
 
 #ifdef CONFIG_TPM
+static void virt_tpm_setup_fw_cfg(VirtMachineState *vms)
+{
+    TPMIf *tpm = tpm_find();
+    PlatformBusDevice *pbus = PLATFORM_BUS_DEVICE(vms->platform_bus_dev);
+    hwaddr offset;
+    FwCfgTPMConfig *config;
+
+    if (!tpm_ppi_enabled(tpm)) {
+        return;
+    }
+
+    offset = platform_bus_get_mmio_addr(pbus, SYS_BUS_DEVICE(tpm), 1);
+    if (offset == -1) {
+        return;
+    }
+
+    config = g_new(FwCfgTPMConfig, 1);
+    *config = (FwCfgTPMConfig) {
+        .tpmppi_address = cpu_to_le32(vms->memmap[VIRT_PLATFORM_BUS].base +
+                                     offset),
+        .tpm_version = tpm_get_version(tpm),
+        .tpmppi_version = TPM_PPI_VERSION_1_30,
+    };
+    fw_cfg_add_file(vms->fw_cfg, "etc/tpm/config", config, sizeof(*config));
+}
+
 static void acpi_dsdt_add_tpm(Aml *scope, VirtMachineState *vms)
 {
     PlatformBusDevice *pbus = PLATFORM_BUS_DEVICE(vms->platform_bus_dev);
@@ -1590,6 +1616,9 @@ void virt_acpi_setup(VirtMachineState *vms)
 
     fw_cfg_add_file(vms->fw_cfg, ACPI_BUILD_TPMLOG_FILE, tables.tcpalog->data,
                     acpi_data_len(tables.tcpalog));
+#ifdef CONFIG_TPM
+    virt_tpm_setup_fw_cfg(vms);
+#endif
 
     if (vms->ras) {
         assert(vms->acpi_dev);

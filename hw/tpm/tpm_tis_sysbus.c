@@ -30,6 +30,7 @@
 #include "hw/core/sysbus.h"
 #include "tpm_tis.h"
 #include "qom/object.h"
+#include "qemu/host-utils.h"
 #include "qemu/memalign.h"
 #include "qemu/units.h"
 

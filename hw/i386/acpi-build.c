@@ -122,12 +122,6 @@ typedef struct AcpiMiscInfo {
 #endif
 } AcpiMiscInfo;
 
-typedef struct FwCfgTPMConfig {
-    uint32_t tpmppi_address;
-    uint8_t tpm_version;
-    uint8_t tpmppi_version;
-} QEMU_PACKED FwCfgTPMConfig;
-
 static bool acpi_get_mcfg(AcpiMcfgInfo *mcfg);
 
 const struct AcpiGenericAddress x86_nvdimm_acpi_dsmio = {

@@ -206,6 +206,12 @@ REG32(CRB_DATA_BUFFER, 0x80)
 #define TPM_PPI_VERSION_NONE        0
 #define TPM_PPI_VERSION_1_30        1
 
+typedef struct FwCfgTPMConfig {
+    uint32_t tpmppi_address;
+    uint8_t tpm_version;
+    uint8_t tpmppi_version;
+} QEMU_PACKED FwCfgTPMConfig;
+
 /* whether function is blocked by BIOS settings; bits 0, 1, 2 */
 #define TPM_PPI_FUNC_NOT_IMPLEMENTED     (0 << 0)
 #define TPM_PPI_FUNC_BIOS_ONLY           (1 << 0)
