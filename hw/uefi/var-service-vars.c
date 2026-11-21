@@ -144,17 +144,20 @@ static uefi_variable *add_variable(uefi_vars_state *uv, QemuUUID guid,
     return var;
 }
 
-static void del_variable(uefi_vars_state *uv, uefi_variable *var)
+static void free_variable(uefi_variable *var)
 {
-    if (!var) {
-        return;
-    }
-
-    QTAILQ_REMOVE(&uv->variables, var, next);
     g_free(var->data);
     g_free(var->name);
     g_free(var->digest);
     g_free(var);
+}
+
+static void del_variable(uefi_vars_state *uv, uefi_variable *var)
+{
+    if (var) {
+        QTAILQ_REMOVE(&uv->variables, var, next);
+        free_variable(var);
+    }
 }
 
 static size_t variable_size(uefi_variable *var)
@@ -608,19 +611,28 @@ static size_t uefi_vars_mm_set_variable(uefi_vars_state *uv, mm_header *mhdr,
         ? new_var->attributes
         : old_var->attributes;
 
-    /* all good, commit */
-    del_variable(uv, old_var);
+    if (old_var) {
+        QTAILQ_REMOVE(&uv->variables, old_var, next);
+    }
+    if ((attributes & EFI_VARIABLE_NON_VOLATILE) && !uefi_vars_json_save(uv)) {
+        if (old_var) {
+            QTAILQ_INSERT_TAIL(&uv->variables, old_var, next);
+        }
+        mvar->status = EFI_DEVICE_ERROR;
+        goto rollback;
+    }
     uv->used_storage = new_storage;
-
-    if (attributes & EFI_VARIABLE_NON_VOLATILE) {
-        uefi_vars_json_save(uv);
-    }
-
-    if (new_var && uefi_vars_is_sb_pk(new_var)) {
-        uefi_vars_auth_init(uv);
-    }
-
     mvar->status = EFI_SUCCESS;
+    if ((new_var && uefi_vars_is_sb_pk(new_var)) ||
+        (old_var && uefi_vars_is_sb_pk(old_var))) {
+        if (!uefi_vars_auth_init(uv)) {
+            mvar->status = EFI_DEVICE_ERROR;
+        }
+    }
+    if (old_var) {
+        free_variable(old_var);
+    }
+
     return sizeof(*mvar);
 
 rollback:

@@ -144,7 +144,7 @@ void uefi_vars_hard_reset(uefi_vars_state *uv);
 
 /* vars-service-json.c */
 void uefi_vars_json_init(uefi_vars_state *uv, Error **errp);
-void uefi_vars_json_save(uefi_vars_state *uv);
+bool uefi_vars_json_save(uefi_vars_state *uv);
 void uefi_vars_json_load(uefi_vars_state *uv, Error **errp);
 
 /* vars-service-vars.c */
@@ -167,7 +167,7 @@ bool uefi_vars_is_sb_any(uefi_variable *var);
 efi_status uefi_vars_check_auth_2(uefi_vars_state *uv, uefi_variable *var,
                                   mm_variable_access *va, void *data);
 efi_status uefi_vars_check_secure_boot(uefi_vars_state *uv, uefi_variable *var);
-void uefi_vars_auth_init(uefi_vars_state *uv);
+bool uefi_vars_auth_init(uefi_vars_state *uv);
 
 /* vars-service-pkcs7.c */
 efi_status uefi_vars_check_pkcs7_2(uefi_variable *siglist,

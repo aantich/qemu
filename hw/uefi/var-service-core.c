@@ -7,7 +7,9 @@
 #include "qemu/crc32c.h"
 #include "qemu/error-report.h"
 #include "system/dma.h"
+#include "system/runstate.h"
 #include "migration/vmstate.h"
+#include "qapi/error.h"
 
 #include "hw/uefi/var-service.h"
 #include "hw/uefi/var-service-api.h"
@@ -42,8 +44,7 @@ static int uefi_vars_post_load(void *opaque, int version_id)
         return -1;
     }
 
-    uefi_vars_json_save(uv);
-    return 0;
+    return uefi_vars_json_save(uv) ? 0 : -EIO;
 }
 
 const VMStateDescription vmstate_uefi_vars = {
@@ -177,7 +178,9 @@ void uefi_vars_hard_reset(uefi_vars_state *uv)
 
     uefi_vars_clear_volatile(uv);
     uefi_vars_policies_clear(uv);
-    uefi_vars_auth_init(uv);
+    if (!uefi_vars_auth_init(uv)) {
+        qemu_system_shutdown_request_with_code(SHUTDOWN_CAUSE_HOST_ERROR, 1);
+    }
 
     uefi_vars_pcap_reset(uv);
 }
@@ -338,7 +341,19 @@ void uefi_vars_init(Object *obj, uefi_vars_state *uv)
 
 void uefi_vars_realize(uefi_vars_state *uv, Error **errp)
 {
+    ERRP_GUARD();
+
     uefi_vars_json_init(uv, errp);
+    if (*errp) {
+        return;
+    }
     uefi_vars_json_load(uv, errp);
+    if (uv->jsonfd != -1) {
+        close(uv->jsonfd);
+        uv->jsonfd = -1;
+    }
+    if (*errp) {
+        return;
+    }
     uefi_vars_pcap_init(uv, errp);
 }

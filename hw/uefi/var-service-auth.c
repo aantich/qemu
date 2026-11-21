@@ -309,7 +309,7 @@ efi_status uefi_vars_check_secure_boot(uefi_vars_state *uv, uefi_variable *var)
 }
 
 /* AuthVariableLibInitialize */
-void uefi_vars_auth_init(uefi_vars_state *uv)
+bool uefi_vars_auth_init(uefi_vars_state *uv)
 {
     uefi_variable *pk_var, *sbe_var;
     uint8_t platform_mode, sb, sbe, vk;
@@ -369,6 +369,5 @@ void uefi_vars_auth_init(uefi_vars_state *uv)
                            EFI_VARIABLE_RUNTIME_ACCESS,
                            &vk, sizeof(vk));
 
-    /* flush to disk */
-    uefi_vars_json_save(uv);
+    return uefi_vars_json_save(uv);
 }

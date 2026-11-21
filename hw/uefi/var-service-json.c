@@ -173,50 +173,38 @@ static GString *uefi_vars_to_json(uefi_vars_state *uv)
 void uefi_vars_json_init(uefi_vars_state *uv, Error **errp)
 {
     if (uv->jsonfile) {
-        uv->jsonfd = qemu_create(uv->jsonfile, O_RDWR | O_BINARY, 0666, errp);
+        uv->jsonfd = qemu_create(uv->jsonfile, O_RDWR | O_BINARY, 0600, errp);
     }
 }
 
-void uefi_vars_json_save(uefi_vars_state *uv)
+bool uefi_vars_json_save(uefi_vars_state *uv)
 {
     g_autoptr(GString) gstr = NULL;
-    int rc;
+    g_autoptr(GError) error = NULL;
 
-    if (uv->jsonfd == -1) {
-        return;
+    if (!uv->jsonfile) {
+        return true;
     }
 
     gstr = uefi_vars_to_json(uv);
 
-    rc = lseek(uv->jsonfd, 0, SEEK_SET);
-    if (rc < 0) {
-        warn_report("%s: lseek error", __func__);
-        return;
+    if (!g_file_set_contents_full(uv->jsonfile, gstr->str, gstr->len,
+                                  G_FILE_SET_CONTENTS_CONSISTENT |
+                                  G_FILE_SET_CONTENTS_DURABLE, 0600, &error)) {
+        error_report("Could not persist UEFI variables: %s", error->message);
+        return false;
     }
-
-    rc = ftruncate(uv->jsonfd, 0);
-    if (rc != 0) {
-        warn_report("%s: ftruncate error", __func__);
-        return;
-    }
-
-    rc = write(uv->jsonfd, gstr->str, gstr->len);
-    if (rc != gstr->len) {
-        warn_report("%s: write error", __func__);
-        return;
-    }
-
-    fsync(uv->jsonfd);
+    return true;
 }
 
 void uefi_vars_json_load(uefi_vars_state *uv, Error **errp)
 {
-    UefiVarStore *vs;
+    ERRP_GUARD();
+    UefiVarStore *vs = NULL;
     QObject *qobj;
     Visitor *v;
-    char *str;
-    ssize_t len;
-    int rc;
+    g_autofree char *str = NULL;
+    int64_t len;
 
     if (uv->jsonfd == -1) {
         return;
@@ -224,7 +212,12 @@ void uefi_vars_json_load(uefi_vars_state *uv, Error **errp)
 
     len = lseek(uv->jsonfd, 0, SEEK_END);
     if (len < 0) {
-        warn_report("%s: lseek error", __func__);
+        error_setg_errno(errp, errno, "Could not size UEFI variable store");
+        return;
+    }
+    /* The on-disk JSON includes hex fields and per-variable metadata. */
+    if (len > 8 * uv->max_storage) {
+        error_setg(errp, "UEFI variable store is too large");
         return;
     }
     if (len == 0) {
@@ -233,16 +226,17 @@ void uefi_vars_json_load(uefi_vars_state *uv, Error **errp)
     }
 
     str = g_malloc(len + 1);
-    lseek(uv->jsonfd, 0, SEEK_SET);
-    rc = read(uv->jsonfd, str, len);
-    if (rc != len) {
-        warn_report("%s: read error", __func__);
-        g_free(str);
+    if (lseek(uv->jsonfd, 0, SEEK_SET) < 0 ||
+        RETRY_ON_EINTR(read(uv->jsonfd, str, len)) != len) {
+        error_setg(errp, "Could not read UEFI variable store");
         return;
     }
     str[len] = 0;
 
     qobj = qobject_from_json(str, errp);
+    if (!qobj) {
+        return;
+    }
     v = qobject_input_visitor_new(qobj);
     visit_type_UefiVarStore(v, NULL, &vs, errp);
     visit_free(v);
@@ -258,5 +252,4 @@ void uefi_vars_json_load(uefi_vars_state *uv, Error **errp)
 
     qapi_free_UefiVarStore(vs);
     qobject_unref(qobj);
-    g_free(str);
 }
